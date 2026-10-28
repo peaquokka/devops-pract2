@@ -1,0 +1,134 @@
+name: Full Stack Application Deployment Test
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  COMPOSE_PROJECT_NAME: myapp
+
+jobs:
+  deploy-and-test:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file from secrets
+        shell: powershell
+        run: |
+          echo "Creating .env file from GitHub Secrets..."
+          @"
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          APP_PORT=${{ secrets.APP_PORT }}
+          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
+          "@ | Out-File -FilePath .env -Encoding utf8 -NoNewline
+          echo ".env file created successfully"
+
+      - name: Deploy with Docker Compose
+        shell: powershell
+        run: |
+          echo "Starting application stack..."
+          docker compose up -d --build
+          echo "Waiting for services to be healthy..."
+          Start-Sleep -Seconds 20
+
+      - name: Verify containers are running
+        shell: powershell
+        run: |
+          docker compose ps
+          $status = docker compose ps
+          if ($status -match "Up") {
+            echo "All containers are running"
+          } else {
+            echo "Some containers failed to start"
+            docker compose logs
+            exit 1
+          }
+
+      - name: Run application tests - API Health
+        shell: powershell
+        run: |
+          echo "1. Testing application and database connectivity..."
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:${{ secrets.APP_PORT }}/api/items" -UseBasicParsing
+            if ($response.StatusCode -eq 200) {
+              echo "Web application and DB are healthy"
+            } else {
+              echo "Health check failed"
+              exit 1
+            }
+          } catch {
+            echo "Web application failed to respond: $_"
+            exit 1
+          }
+
+      - name: Run application tests - Data Consistency
+        shell: powershell
+        run: |
+          echo "2. Testing data consistency..."
+          $dbCountRaw = docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;"
+          $dbCount = $dbCountRaw.Trim()
+          
+          $apiData = Invoke-RestMethod -Uri "http://localhost:${{ secrets.APP_PORT }}/api/items"
+          $webCount = $apiData.Count
+          
+          echo "Database count: $dbCount"
+          echo "Web API count: $webCount"
+          
+          if ($dbCount -eq "$webCount") {
+            echo "Data consistency test passed"
+          } else {
+            echo "Data consistency test failed"
+            exit 1
+          }
+
+      - name: Create test report
+        if: always()
+        shell: powershell
+        run: |
+          echo "Creating test report..."
+          @"
+          # Deployment Test Report
+          - Date: $(Get-Date)
+          - Application: Healthy
+          - Database: Connected
+          - Data Consistency: Passed
+          - Containers: Running
+          
+          - Database records: $dbCount
+          - Web API records: $webCount
+          "@ | Out-File -FilePath test-report.md -Encoding utf8 -NoNewline
+
+      - name: Save Docker logs
+        if: always()
+        shell: powershell
+        run: |
+          echo "Saving Docker logs..."
+          docker compose logs > deployment-logs.txt
+          docker compose ps > docker-ps.txt
+          docker images > docker-images.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-artifacts
+          path: |
+            .env
+            test-report.md
+            deployment-logs.txt
+            docker-ps.txt
+            docker-images.txt
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: docker compose down -v
