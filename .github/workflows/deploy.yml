@@ -20,7 +20,7 @@ jobs:
         shell: powershell
         run: |
           echo "Creating .env file from GitHub Secrets..."
-          @"
+          $envContent = @"
           DB_HOST=${{ secrets.DB_HOST }}
           DB_PORT=${{ secrets.DB_PORT }}
           DB_NAME=${{ secrets.DB_NAME }}
@@ -28,12 +28,16 @@ jobs:
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           APP_PORT=${{ secrets.APP_PORT }}
           COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
-          "@ | Out-File -FilePath .env -Encoding utf8 -NoNewline
+          "@
+          [System.IO.File]::WriteAllText("$PWD\.env", $envContent)
           echo ".env file created successfully"
 
       - name: Deploy with Docker Compose
         shell: powershell
         run: |
+          echo "Cleaning up old containers..."
+          docker compose down -v
+          
           echo "Starting application stack..."
           docker compose up -d --build
           echo "Waiting for services to be healthy..."
